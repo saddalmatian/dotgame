@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+  <meta charset="UTF-8" />
+  <title>Mini Agar Game</title>
+  <style>
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      font-family: system-ui, Arial;
+      background: #0f1115;
+      color: #eee;
+    }
+
+    #hud {
+      position: fixed;
+      top: 8px;
+      left: 8px;
+      background: rgba(0, 0, 0, 0.4);
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 14px;
+      backdrop-filter: blur(6px);
+    }
+
+    #leaderboard {
+      margin-top: 6px;
+      font-size: 13px;
+    }
+
+    canvas {
+      display: block;
+    }
+
+    #msg {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(0, 0, 0, .6);
+      padding: 20px 28px;
+      border-radius: 12px;
+      text-align: center;
+      display: none;
+    }
+
+    #nameOverlay {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #0f1115ee;
+      z-index: 50;
+    }
+
+    #nameOverlay form {
+      background: #161b22;
+      padding: 28px 34px;
+      border-radius: 14px;
+      box-shadow: 0 4px 18px -4px #000;
+      min-width: 300px;
+    }
+
+    #nameOverlay h1 {
+      margin: 0 0 14px;
+      font-size: 22px;
+    }
+
+    #nameOverlay input {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #333;
+      background: #0d1117;
+      color: #eee;
+      border-radius: 6px;
+      font-size: 15px;
+    }
+
+    #nameOverlay button {
+      margin-top: 14px;
+      width: 100%;
+      padding: 10px 12px;
+      border: none;
+      background: #2563eb;
+      color: #fff;
+      font-weight: 600;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    #nameOverlay button:hover {
+      background: #1d4ed8;
+    }
+
+    #status {
+      position: fixed;
+      top: 8px;
+      right: 8px;
+      background: rgba(0, 0, 0, 0.4);
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 13px;
+      text-align: right;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="nameOverlay">
+    <form id="nameForm">
+      <h1>Nhập tên</h1>
+      <input id="playerName" maxlength="16" placeholder="Tên của bạn" autocomplete="off" required />
+      <button type="submit">Bắt đầu</button>
+    </form>
+  </div>
+  <div id="hud">
+    <div>ID: <span id="pid"></span></div>
+    <div>Kích thước: <span id="size">0</span></div>
+    <div id="leaderboard"></div>
+  </div>
+  <div id="msg"></div>
+  <div id="status"></div>
+  <canvas id="game"></canvas>
+  <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    let W = window.innerWidth,
+      H = window.innerHeight;
+    canvas.width = W;
+    canvas.height = H;
+    window.addEventListener('resize', () => {
+      W = innerWidth;
+      H = innerHeight;
+      canvas.width = W;
+      canvas.height = H;
+    });
+
+    const state = {
+      id: null,
+      players: [],
+      foods: [],
+      map: {
+        w: 3000,
+        h: 3000
+      }
+    };
+    let my = null;
+    let hasSentName = false;
+
+    const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+
+    let speedStacks = 0;
+    let speedUntil = 0;
+    let shieldUntil = 0;
+    let attractUntil = 0;
+    let attractRange = 0;
+
+    // Smoothing: lưu vị trí đã làm mượt cho từng người chơi và thời gian khung hình
+    const smoothPlayers = new Map();
+    let lastTS = performance.now();
+    const BASE_SMOOTHING = 0.25; // 0..1, lớn hơn = bám sát hơn (0.2-0.35 là hợp lý)
+
+    ws.onmessage = (ev) => {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === 'init') {
+        state.id = msg.id;
+        state.map = msg.map;
+        document.getElementById('pid').textContent = msg.id;
+      } else if (msg.type === 'state') {
+        state.players = msg.players;
+        state.foods = msg.foods;
+        my = state.players.find(p => p.id === state.id);
+        if (my) document.getElementById('size').textContent = my.r.toFixed(1);
+        render();
+        updateStatus();
+      } else if (msg.type === 'dead') {
+        const killerLabel = msg.killerName || (msg.killer ? String(msg.killer).slice(0, 4) : '');
+        showMessage('Bạn bị ăn bởi ' + killerLabel + '! Bạn sẽ hồi sinh.');
+        setTimeout(() => hideMessage(), 1500);
+      } else if (msg.type === 'effect') {
+        if (msg.effect === 'speed') {
+          speedStacks = Number(msg.stacks ?? speedStacks) || 0;
+          speedUntil = Date.now() / 1000 + (msg.duration ?? 5);
+        } else if (msg.effect === 'shield') {
+          shieldUntil = Date.now() / 1000 + (msg.duration ?? 5);
+        } else if (msg.effect === 'attract') {
+          attractRange = Number(msg.range ?? attractRange) || 0;
+          attractUntil = Date.now() / 1000 + (msg.duration ?? 10);
+        }
+        updateStatus();
+      }
+    };
+
+    document.getElementById('nameForm').addEventListener('submit', e => {
+      e.preventDefault();
+      if (hasSentName) return;
+      const name = document.getElementById('playerName').value.trim();
+      if (name) {
+        ws.send(JSON.stringify({
+          type: 'set_name',
+          name
+        }));
+        hasSentName = true;
+        document.getElementById('nameOverlay').style.display = 'none';
+      }
+    });
+
+    function showMessage(t) {
+      const m = document.getElementById('msg');
+      m.textContent = t;
+      m.style.display = 'block';
+    }
+
+    function hideMessage() {
+      document.getElementById('msg').style.display = 'none';
+    }
+
+    function updateStatus() {
+      const now = Date.now() / 1000;
+      const parts = [];
+      if (speedUntil > now) {
+        const multi = 1 + 0.01 * (Number(speedStacks) || 0);
+        const remain = Math.max(0, speedUntil - now).toFixed(1);
+        parts.push(`Tốc độ x${multi.toFixed(2)} (${remain}s)`);
+      }
+      if (shieldUntil > now) {
+        const remain = Math.max(0, shieldUntil - now).toFixed(1);
+        parts.push(`Bất tử (${remain}s)`);
+      }
+      if (attractUntil > now) {
+        const remain = Math.max(0, attractUntil - now).toFixed(1);
+        parts.push(`Lực hút R=${Math.round(attractRange)} (${remain}s)`);
+      }
+      document.getElementById('status').innerHTML = parts.join('<br>');
+    }
+
+    canvas.addEventListener('mousemove', e => {
+      if (!my) return;
+      const world = screenToWorld(e.clientX, e.clientY);
+      ws.send(JSON.stringify({
+        type: 'move',
+        x: world.x,
+        y: world.y
+      }));
+    });
+    canvas.addEventListener('touchmove', e => {
+      if (!my) return;
+      const t = e.touches[0];
+      const world = screenToWorld(t.clientX, t.clientY);
+      ws.send(JSON.stringify({
+        type: 'move',
+        x: world.x,
+        y: world.y
+      }));
+      e.preventDefault();
+    }, {
+      passive: false
+    });
+
+    function screenToWorld(sx, sy) {
+      if (!my) return {
+        x: 0,
+        y: 0
+      };
+      const scale = 1; // Could add zoom based on size
+      const camX = my.x - W / 2;
+      const camY = my.y - H / 2;
+      return {
+        x: camX + sx / scale,
+        y: camY + sy / scale
+      };
+    }
+
+    function render() {
+      if (!my) {
+        ctx.clearRect(0, 0, W, H);
+        return;
+      }
+      ctx.clearRect(0, 0, W, H);
+
+      // Tính hệ số nội suy theo thời gian khung hình (ổn định ở 60 FPS)
+      const nowTS = performance.now();
+      const frames = Math.max(1, (nowTS - lastTS) / 16.6667);
+      const alpha = 1 - Math.pow(1 - BASE_SMOOTHING, frames);
+      lastTS = nowTS;
+
+      // Làm mượt vị trí của bản thân để camera đỡ rung
+      let myS = smoothPlayers.get(my.id);
+      if (!myS) {
+        myS = { x: my.x, y: my.y, r: my.r, attractRange: Number(my.attractRange || 0) };
+        smoothPlayers.set(my.id, myS);
+      } else {
+        myS.x += (my.x - myS.x) * alpha;
+        myS.y += (my.y - myS.y) * alpha;
+        myS.r += (my.r - myS.r) * alpha;
+        myS.attractRange += ((Number(my.attractRange || 0)) - myS.attractRange) * alpha;
+      }
+
+      const camX = myS.x - W / 2;
+      const camY = myS.y - H / 2;
+
+      // Background grid
+      ctx.strokeStyle = '#1d2228';
+      ctx.lineWidth = 1;
+      const gridSize = 100;
+      const startX = - (camX % gridSize);
+      const startY = - (camY % gridSize);
+      for (let x = startX; x < W; x += gridSize) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, H);
+        ctx.stroke();
+      }
+      for (let y = startY; y < H; y += gridSize) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(W, y);
+        ctx.stroke();
+      }
+
+      // Foods
+      for (const f of state.foods) {
+        const sx = f.x - camX;
+        const sy = f.y - camY;
+        if (sx < -20 || sx > W + 20 || sy < -20 || sy > H + 20) continue;
+        const fr = (typeof f.r === 'number' ? f.r : 6);
+        const color = f.color || '#ffd54f';
+        ctx.beginPath();
+        ctx.fillStyle = color;
+        ctx.arc(sx, sy, fr, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Players (vị trí đã làm mượt) + vòng lực hút cùng màu
+      const sorted = [...state.players].sort((a, b) => a.r - b.r);
+      for (const p of sorted) {
+        let s = smoothPlayers.get(p.id);
+        if (!s) {
+          s = { x: p.x, y: p.y, r: p.r, attractRange: Number(p.attractRange || 0) };
+          smoothPlayers.set(p.id, s);
+        } else {
+          s.x += (p.x - s.x) * alpha;
+          s.y += (p.y - s.y) * alpha;
+          s.r += (p.r - s.r) * alpha;
+          s.attractRange += ((Number(p.attractRange || 0)) - s.attractRange) * alpha;
+        }
+
+        const sx = s.x - camX,
+          sy = s.y - camY;
+        // Nút người chơi
+        ctx.beginPath();
+        ctx.fillStyle = p.color;
+        ctx.arc(sx, sy, s.r, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Tên
+        ctx.fillStyle = '#fff';
+        ctx.font = '12px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText((p.name || p.id.slice(0, 4)), sx, sy + 4);
+        if (p.id === state.id) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke(); }
+
+        // Vòng lực hút (cùng màu với nút), hiển thị khi còn đáng kể
+        if (s.attractRange > 0.5) {
+          const rr = s.r + s.attractRange;
+          ctx.save();
+          ctx.strokeStyle = p.color; // cùng màu với người chơi
+          ctx.globalAlpha = (p.id === state.id) ? 0.85 : 0.55; // đậm hơn cho bản thân
+          ctx.lineWidth = 2;
+          ctx.setLineDash([6, 6]);
+          ctx.beginPath();
+          ctx.arc(sx, sy, rr, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+
+      // Leaderboard & status
+      const board = [...state.players].sort((a, b) => b.r - a.r).slice(0, 8)
+        .map((p, i) => `#${i + 1} ${(p.name || p.id.slice(0, 4))} ${(p.r).toFixed(1)}`).join('<br>');
+      document.getElementById('leaderboard').innerHTML = '<b>Bảng xếp hạng</b><br>' + board;
+      updateStatus();
+    }
+
+    // Vòng lặp vẽ để chuyển động mượt hơn (thay vì chỉ render khi có gói tin)
+    (function loop() {
+      render();
+      requestAnimationFrame(loop);
+    })();
+  </script>
+</body>
+
+</html>
