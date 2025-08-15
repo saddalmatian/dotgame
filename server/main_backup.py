@@ -38,10 +38,10 @@ STATIC_DIR = BASE_DIR / "static"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
 # Game constants
-MAP_WIDTH = 5000
-MAP_HEIGHT = 5000
-TICK_RATE = 1/60  # 60 FPS server updates (giảm lag)
-FOOD_COUNT = 800  # giảm từ 1500 xuống 800 để tối ưu performance
+MAP_WIDTH = 3000
+MAP_HEIGHT = 3000
+TICK_RATE = 1/30  # 30 FPS server updates
+FOOD_COUNT = 300
 FOOD_VALUE = 3
 INITIAL_RADIUS = 15
 MOVE_SPEED = 2000  # base units / second (tăng từ 180)
@@ -52,7 +52,7 @@ RESPAWN_RADIUS = 15
 
 # Boost constants
 BOOST_SPEED_MULTIPLIER = 2.0  # tốc độ tăng lên khi boost
-BOOST_RADIUS_COST = 10.0  # kích thước mất mỗi giây khi boost (0.1 per 0.01ms)
+BOOST_MASS_COST = 0.5  # khối lượng mất mỗi giây khi boost
 MIN_RADIUS_FOR_BOOST = 10  # bán kính tối thiểu để có thể boost
 
 # Arrow constants
@@ -60,26 +60,15 @@ ARROW_SPEED = 800  # tốc độ mũi tên
 ARROW_LIFETIME = 3.0  # thời gian sống của mũi tên (giây)
 ARROW_SIZE = 3  # kích thước mũi tên
 
-# Shield constants
-SHIELD_DURATION_ACTIVE = 5.0  # thời gian hoạt động của khiên (giây)
-SHIELD_COOLDOWN = 7.0  # thời gian hồi chiêu khiên (giây)
-
-# Invisibility constants (now orbital defense)
-ORBITAL_DURATION = 5.0  # thời gian vòng tròn quay (giây)
-ORBITAL_RADIUS = 30  # khoảng cách vòng tròn từ player
-ORBITAL_SPEED = 2.0  # tốc độ quay (rad/giây)
-ORBITAL_SIZE = 5  # kích thước vòng tròn quay
-
 # Food and power-up settings
 FOOD_MIN_R = 4
 FOOD_MAX_R = 10
 SPEED_FOOD_CHANCE = 0.30  # green
-SHIELD_FOOD_CHANCE = 0.05  # red (arrow ammo)
+SHIELD_FOOD_CHANCE = 0.02  # red (giảm từ 5%)
 BLUE_FOOD_CHANCE = 0.10  # blue
-PINK_FOOD_CHANCE = 0.05  # pink (deflect shield)
-ORANGE_FOOD_CHANCE = 0.08  # orange (orbital defense)
 SPEED_BOOST = 1.20
 SPEED_DURATION = 5.0
+SHIELD_DURATION = 5.0
 ATTRACTION_DURATION = 10.0
 ATTRACTION_RANGE_PER_UNIT = 6.0  # nhỏ hơn
 
@@ -122,7 +111,7 @@ def spawn_food():
         # Decide type by probability
         roll = random.random()
         if roll < SHIELD_FOOD_CHANCE:
-            ftype = "shield"  # red (arrows)
+            ftype = "shield"  # red
             color = "#ef4444"
         elif roll < SHIELD_FOOD_CHANCE + SPEED_FOOD_CHANCE:
             ftype = "speed"  # green
@@ -130,18 +119,9 @@ def spawn_food():
         elif roll < SHIELD_FOOD_CHANCE + SPEED_FOOD_CHANCE + BLUE_FOOD_CHANCE:
             ftype = "attract"  # blue
             color = "#3b82f6"
-        elif roll < (SHIELD_FOOD_CHANCE + SPEED_FOOD_CHANCE +
-                     BLUE_FOOD_CHANCE + PINK_FOOD_CHANCE):
-            ftype = "deflect"  # pink shield
-            color = "#ec4899"
-        elif roll < (SHIELD_FOOD_CHANCE + SPEED_FOOD_CHANCE +
-                     BLUE_FOOD_CHANCE + PINK_FOOD_CHANCE +
-                     ORANGE_FOOD_CHANCE):
-            ftype = "orbital"  # orange orbital defense
-            color = "#f97316"
         else:
             ftype = "normal"
-            color = "#9ca3af"  # màu xám thay vì vàng
+            color = "#ffd54f"
         # Bán kính hạt: viên xanh dương nhỏ hơn
         if ftype == "attract":
             r = random.uniform(FOOD_MIN_R, FOOD_MIN_R + 2)
@@ -201,7 +181,7 @@ def drop_food_at_death(x, y, radius):
             "r": food_radius,
             "value": mass_per_piece,
             "type": "normal",
-            "color": "#9ca3af",  # màu xám
+            "color": "#ffd54f",
         }
 
 
@@ -225,31 +205,15 @@ async def game_loop():
             ):
                 p["attractRange"] = 0.0
             
-            # Handle shield expiration
-            if p.get("shieldUntil", 0) <= now and p.get("shieldActive", False):
-                p["shieldActive"] = False
-            
-            # Handle invisibility expiration (now orbital defense)
-            orbitals = p.get("orbitals", [])
-            active_orbitals = []
-            for orbital in orbitals:
-                if orbital["expiresAt"] > now:
-                    # Update orbital position
-                    orbital["angle"] += ORBITAL_SPEED * dt
-                    angle = orbital["angle"]
-                    orbital["x"] = p["x"] + ORBITAL_RADIUS * math.cos(angle)
-                    orbital["y"] = p["y"] + ORBITAL_RADIUS * math.sin(angle)
-                    active_orbitals.append(orbital)
-            p["orbitals"] = active_orbitals
-            
-            # Handle boost (tiêu tốn kích thước trực tiếp)
+            # Handle boost (tiêu tốn khối lượng)
             if p.get("boosting", False):
                 if p["r"] > MIN_RADIUS_FOR_BOOST:
-                    # Giảm kích thước trực tiếp
-                    radius_cost = BOOST_RADIUS_COST * dt
-                    min_r = MIN_RADIUS_FOR_BOOST
-                    new_radius = max(min_r, p["r"] - radius_cost)
-                    p["r"] = new_radius
+                    # Giảm khối lượng
+                    current_mass = mass_from_radius(p["r"])
+                    mass_cost = BOOST_MASS_COST * dt
+                    min_mass = mass_from_radius(MIN_RADIUS_FOR_BOOST)
+                    new_mass = max(min_mass, current_mass - mass_cost)
+                    p["r"] = radius_from_mass(new_mass)
                 else:
                     p["boosting"] = False
             
@@ -299,83 +263,56 @@ async def game_loop():
                 expired_arrows.append(aid)
                 continue
             
-            # Check arrow collision with players (optimized)
+            # Check arrow collision with players
             for pid, p in list(players.items()):
                 if pid == arrow["shooter"]:  # không bắn chính mình
                     continue
-                
-                # Quick distance check first
+                    
+                # Check if arrow hits player
                 dx = arrow["x"] - p["x"]
                 dy = arrow["y"] - p["y"]
-                check_dist = p["r"] + ARROW_SIZE
+                dist = math.hypot(dx, dy)
                 
-                # Skip if clearly too far
-                if abs(dx) > check_dist or abs(dy) > check_dist:
-                    continue
-                
-                if dx * dx + dy * dy <= check_dist * check_dist:
-                    # Check if player has active shield
-                    if p.get("shieldActive", False):
-                        # Deflect arrow back to shooter
-                        shooter = players.get(arrow["shooter"])
-                        if shooter:
-                            # Reverse arrow direction towards shooter
-                            back_dx = shooter["x"] - arrow["x"]
-                            back_dy = shooter["y"] - arrow["y"]
-                            back_dist = math.hypot(back_dx, back_dy)
-                            if back_dist > 1e-3:
-                                speed = ARROW_SPEED
-                                arrow["vx"] = (back_dx / back_dist) * speed
-                                arrow["vy"] = (back_dy / back_dist) * speed
-                                arrow["shooter"] = pid  # chuyển quyền sở hữu
-                        break
-                    else:
-                        # Normal arrow hit - eliminate player
-                        shooter_player = players.get(arrow["shooter"])
-                        
-                        # Drop food at death location
-                        drop_food_at_death(p["x"], p["y"], p["r"])
-                        
-                        # Give mass to shooter
-                        if shooter_player:
-                            s_mass = mass_from_radius(shooter_player["r"])
-                            victim_mass = mass_from_radius(p["r"])
-                            new_mass = s_mass + victim_mass * 0.5
-                            shooter_player["r"] = radius_from_mass(new_mass)
-                        
-                        await eliminate_player(pid, killer=arrow["shooter"])
-                        expired_arrows.append(aid)
-                        break
+                if dist <= p["r"] + ARROW_SIZE:
+                    # Player hit by arrow - eliminate them
+                    shooter_player = players.get(arrow["shooter"])
+                    
+                    # Drop food at death location
+                    drop_food_at_death(p["x"], p["y"], p["r"])
+                    
+                    # Give mass to shooter
+                    if shooter_player:
+                        shooter_mass = mass_from_radius(shooter_player["r"])
+                        victim_mass = mass_from_radius(p["r"])
+                        new_mass = shooter_mass + victim_mass * 0.5
+                        shooter_player["r"] = radius_from_mass(new_mass)
+                    
+                    await eliminate_player(pid, killer=arrow["shooter"])
+                    expired_arrows.append(aid)
+                    break
         
         # Remove expired arrows
         for aid in expired_arrows:
             if aid in arrows:
                 del arrows[aid]
 
-        # Handle food collisions (optimized)
+        # Handle food collisions
         eaten_food_ids: List[int] = []
         food_items = list(foods.items())
         for pid, p in players.items():
-            # Pre-calculate player attraction range
-            extra = (
-                p.get("attractRange", 0.0)
-                if p.get("attractUntil", 0) > now
-                else 0.0
-            )
-            player_range = p["r"] + extra
-            
             for fid, f in food_items:
                 if fid in foods:
                     fr = float(f.get("r", 6))
-                    total_range = player_range + fr
-                    
-                    # Quick distance check
-                    dx = p["x"] - f["x"]
-                    dy = p["y"] - f["y"]
-                    if abs(dx) > total_range or abs(dy) > total_range:
-                        continue
-                    
-                    if dx * dx + dy * dy <= total_range * total_range:
+                    extra = (
+                        p.get("attractRange", 0.0)
+                        if p.get("attractUntil", 0) > now
+                        else 0.0
+                    )
+                    eff_r = p["r"] + fr + extra
+                    if (
+                        (p["x"] - f["x"]) ** 2 + (p["y"] - f["y"]) ** 2
+                        <= eff_r ** 2
+                    ):
                         # Apply power-up effects
                         ftype = f.get("type", "normal")
                         if ftype == "speed":
@@ -403,11 +340,12 @@ async def game_loop():
                         elif ftype == "shield":
                             fr = float(f.get("r", 6))
                             area_ratio = (fr / 6.0) ** 2
-                            duration = SHIELD_DURATION_ACTIVE * area_ratio
+                            duration = SHIELD_DURATION * area_ratio
                             p["invUntil"] = now + duration
-                            # Cung cấp 10 mũi tên cố định cho mỗi viên đỏ
+                            # Cung cấp thêm mũi tên (1-3 mũi tên tùy kích thước)
+                            ammo_gain = max(1, int(area_ratio * 3))
                             current_ammo = p.get("shieldAmmo", 0)
-                            p["shieldAmmo"] = current_ammo + 10
+                            p["shieldAmmo"] = current_ammo + ammo_gain
                             # notify player: chỉ cập nhật góc phải
                             ws = connections.get(pid)
                             if ws:
@@ -443,56 +381,6 @@ async def game_loop():
                                     )
                                 except Exception:
                                     pass
-                        elif ftype == "deflect":
-                            # Pink shield food - cung cấp deflect shields
-                            fr = float(f.get("r", 6))
-                            area_ratio = (fr / 6.0) ** 2
-                            shield_gain = max(1, int(area_ratio * 2))
-                            current_shields = p.get("deflectShields", 0)
-                            p["deflectShields"] = current_shields + shield_gain
-                            # notify player
-                            ws = connections.get(pid)
-                            if ws:
-                                try:
-                                    await ws.send_text(
-                                        json.dumps({
-                                            "type": "effect",
-                                            "effect": "deflect",
-                                            "shields": p["deflectShields"],
-                                        })
-                                    )
-                                except Exception:
-                                    pass
-                        elif ftype == "orbital":
-                            # Orange food - orbital defense (vòng tròn quay)
-                            # Thêm 1 vòng tròn quay quanh player
-                            orbitals = p.get("orbitals", [])
-                            
-                            # Tạo vòng tròn mới với góc ngẫu nhiên
-                            new_orbital = {
-                                "id": len(orbitals),
-                                "angle": random.uniform(0, 2 * math.pi),
-                                "x": p["x"],
-                                "y": p["y"],
-                                "expiresAt": now + ORBITAL_DURATION
-                            }
-                            orbitals.append(new_orbital)
-                            p["orbitals"] = orbitals
-                            
-                            # notify player
-                            ws = connections.get(pid)
-                            if ws:
-                                try:
-                                    await ws.send_text(
-                                        json.dumps({
-                                            "type": "effect",
-                                            "effect": "orbital",
-                                            "count": len(orbitals),
-                                            "duration": ORBITAL_DURATION,
-                                        })
-                                    )
-                                except Exception:
-                                    pass
                         # Eat food (increase mass)
                         eaten_food_ids.append(fid)
                         del foods[fid]
@@ -503,7 +391,7 @@ async def game_loop():
         if eaten_food_ids:
             spawn_food()
 
-        # Handle player collisions (optimized with distance pre-check)
+        # Handle player collisions (simple O(n^2))
         pids = list(players.keys())
         for i in range(len(pids)):
             for j in range(i + 1, len(pids)):
@@ -511,99 +399,37 @@ async def game_loop():
                 b = players.get(pids[j])
                 if not a or not b:
                     continue
-                
-                # Check orbital collision first
-                # Player A's orbitals vs Player B
-                for orbital in a.get("orbitals", []):
-                    dx = orbital["x"] - b["x"]
-                    dy = orbital["y"] - b["y"]
-                    dist = math.hypot(dx, dy)
-                    if dist <= ORBITAL_SIZE + b["r"]:
-                        # Player B hit by Player A's orbital
-                        drop_food_at_death(b["x"], b["y"], b["r"])
-                        # Give mass to orbital owner
-                        a_mass = mass_from_radius(a["r"])
-                        b_mass = mass_from_radius(b["r"])
-                        new_mass = a_mass + b_mass * 0.5
-                        a["r"] = radius_from_mass(new_mass)
-                        await eliminate_player(b["id"], killer=a["id"])
-                        continue
-                
-                # Player B's orbitals vs Player A
-                for orbital in b.get("orbitals", []):
-                    dx = orbital["x"] - a["x"]
-                    dy = orbital["y"] - a["y"]
-                    dist = math.hypot(dx, dy)
-                    if dist <= ORBITAL_SIZE + a["r"]:
-                        # Player A hit by Player B's orbital
-                        drop_food_at_death(a["x"], a["y"], a["r"])
-                        # Give mass to orbital owner
-                        b_mass = mass_from_radius(b["r"])
-                        a_mass = mass_from_radius(a["r"])
-                        new_mass = b_mass + a_mass * 0.5
-                        b["r"] = radius_from_mass(new_mass)
-                        await eliminate_player(a["id"], killer=b["id"])
-                        continue
-                
-                # Normal player collision (if both still exist)
-                if pids[i] not in players or pids[j] not in players:
-                    continue
-                
-                # Quick distance check first (avoid expensive sqrt)
                 dx = a["x"] - b["x"]
                 dy = a["y"] - b["y"]
-                max_dist = a["r"] + b["r"]
-                
-                # Skip if clearly too far apart
-                if abs(dx) > max_dist or abs(dy) > max_dist:
-                    continue
-                
                 dist2 = dx * dx + dy * dy
-                if dist2 <= max_dist * max_dist:
-                    # Normal collision (no invisibility check needed)
-                    if a["r"] > b["r"]:
-                        m = (mass_from_radius(a["r"]) +
-                             mass_from_radius(b["r"]))
+                if dist2 <= (a["r"] + b["r"]) ** 2:
+                    inv_a = a.get("invUntil", 0) > now
+                    inv_b = b.get("invUntil", 0) > now
+                    if a["r"] > b["r"] and not inv_b:
+                        m = mass_from_radius(a["r"]) + mass_from_radius(b["r"])
                         a["r"] = radius_from_mass(m)
                         await eliminate_player(b["id"], killer=a["id"])
-                    elif b["r"] > a["r"]:
-                        m = (mass_from_radius(b["r"]) +
-                             mass_from_radius(a["r"]))
+                    elif b["r"] > a["r"] and not inv_a:
+                        m = mass_from_radius(b["r"]) + mass_from_radius(a["r"])
                         b["r"] = radius_from_mass(m)
                         await eliminate_player(a["id"], killer=b["id"])
 
-        # Broadcast state - mỗi player nhận state khác nhau
-        # Tối ưu: chỉ gửi data cần thiết
-        for pid, ws in list(connections.items()):
+        # Broadcast state
+        state = {
+            "type": "state",
+            "players": list(players.values()),
+            "foods": list(foods.values()),
+            "arrows": list(arrows.values())
+        }
+        msg = json.dumps(state)
+        dead_connections = []
+        for pid, ws in connections.items():
             try:
-                # All players visible (no invisibility anymore)
-                visible_players = list(players.values())
-                
-                # Collect all orbitals from all players
-                all_orbitals = []
-                for p in players.values():
-                    for orbital in p.get("orbitals", []):
-                        all_orbitals.append({
-                            "id": f"{p['id']}_{orbital['id']}",
-                            "x": orbital["x"],
-                            "y": orbital["y"],
-                            "owner": p["id"]
-                        })
-                
-                # Compact state object
-                state = {
-                    "type": "state",
-                    "players": visible_players,
-                    "foods": list(foods.values()),
-                    "arrows": list(arrows.values()),
-                    "orbitals": all_orbitals
-                }
-                
-                # Gửi compressed JSON
-                msg = json.dumps(state, separators=(',', ':'))
                 await ws.send_text(msg)
             except Exception:
-                await disconnect_player(pid)
+                dead_connections.append(pid)
+        for d in dead_connections:
+            await disconnect_player(d)
 
         await asyncio.sleep(TICK_RATE)
 
@@ -661,14 +487,10 @@ def new_player(pid: str, respawn=False, name: str = ""):
         "score": 0,
         "boosting": False,  # trạng thái tăng tốc
         "shieldAmmo": 0,  # số lượng mũi tên có thể bắn
-        "deflectShields": 0,  # số lượng khiên phản đạn
-        "shieldActive": False,  # khiên đang hoạt động
-        "shieldUntil": 0.0,  # thời gian khiên hết hiệu lực
-        "shieldCooldownUntil": 0.0,  # thời gian hồi chiêu khiên
-        "orbitals": [],  # danh sách vòng tròn quay quanh player
         # effect timers (perf_counter timestamps)
         "speedUntil": 0.0,
         "speedStacks": 0,
+        "invUntil": 0.0,
         "attractUntil": 0.0,
         "attractRange": 0.0,
     }
@@ -716,28 +538,6 @@ def create_arrow(shooter_id: str, target_x: float, target_y: float):
     
     arrows[arrow_id] = arrow
     return arrow
-
-
-def activate_shield(player_id: str):
-    """Kích hoạt khiên phản đạn"""
-    player = players.get(player_id)
-    if not player:
-        return False
-    
-    now = time.perf_counter()
-    
-    # Kiểm tra có shield không và không trong cooldown
-    if (player.get("deflectShields", 0) <= 0 or
-            player.get("shieldCooldownUntil", 0) > now):
-        return False
-    
-    # Kích hoạt khiên
-    player["deflectShields"] -= 1
-    player["shieldActive"] = True
-    player["shieldUntil"] = now + SHIELD_DURATION_ACTIVE
-    player["shieldCooldownUntil"] = now + SHIELD_COOLDOWN
-    
-    return True
 
 
 async def disconnect_player(pid: str):
@@ -792,24 +592,6 @@ async def websocket_endpoint(ws: WebSocket):
                     target_x = float(msg.get("x", p["x"]))
                     target_y = float(msg.get("y", p["y"]))
                     create_arrow(pid, target_x, target_y)
-            elif mtype == "shield":
-                p = players.get(pid)
-                if p:
-                    success = activate_shield(pid)
-                    # Thông báo kết quả về client
-                    try:
-                        now = time.perf_counter()
-                        cooldown_left = p.get("shieldCooldownUntil", 0) - now
-                        await ws.send_text(
-                            json.dumps({
-                                "type": "shield_result",
-                                "success": success,
-                                "shields": p.get("deflectShields", 0),
-                                "cooldown": cooldown_left
-                            })
-                        )
-                    except Exception:
-                        pass
     except WebSocketDisconnect:
         await disconnect_player(pid)
     except Exception:

@@ -143,6 +143,8 @@
       id: null,
       players: [],
       foods: [],
+      arrows: [],  // thêm arrays để lưu mũi tên
+      orbitals: [],  // thêm arrays để lưu vòng tròn quay
       map: {
         w: 3000,
         h: 3000
@@ -150,6 +152,12 @@
     };
     let my = null;
     let hasSentName = false;
+    let isBoostHeld = false;  // trạng thái giữ chuột trái để boost
+    let shieldAmmo = 0;  // số mũi tên hiện có
+    let deflectShields = 0;  // số khiên phản đạn
+    let shieldActive = false;  // khiên đang hoạt động
+    let shieldCooldown = 0;  // thời gian cooldown khiên
+    let invisibilityUntil = 0;  // thời gian hết tàng hình
 
     const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
 
@@ -173,8 +181,15 @@
       } else if (msg.type === 'state') {
         state.players = msg.players;
         state.foods = msg.foods;
+        state.arrows = msg.arrows || [];  // cập nhật danh sách mũi tên
+        state.orbitals = msg.orbitals || [];  // cập nhật danh sách vòng tròn
         my = state.players.find(p => p.id === state.id);
-        if (my) document.getElementById('size').textContent = my.r.toFixed(1);
+        if (my) {
+          document.getElementById('size').textContent = my.r.toFixed(1);
+          shieldAmmo = my.shieldAmmo || 0;  // cập nhật số mũi tên
+          deflectShields = my.deflectShields || 0;  // cập nhật số khiên
+          shieldActive = my.shieldActive || false;  // trạng thái khiên
+        }
         render();
         updateStatus();
       } else if (msg.type === 'dead') {
@@ -187,10 +202,33 @@
           speedUntil = Date.now() / 1000 + (msg.duration ?? 5);
         } else if (msg.effect === 'shield') {
           shieldUntil = Date.now() / 1000 + (msg.duration ?? 5);
+          shieldAmmo = msg.ammo || 0;  // cập nhật số mũi tên khi nhận shield
         } else if (msg.effect === 'attract') {
           attractRange = Number(msg.range ?? attractRange) || 0;
           attractUntil = Date.now() / 1000 + (msg.duration ?? 10);
+        } else if (msg.effect === 'deflect') {
+          deflectShields = msg.shields || 0;
+        } else if (msg.effect === 'invisibility') {
+          invisibilityUntil = Date.now() / 1000 + (msg.duration || 1);
+          showMessage(`Tàng hình ${msg.duration.toFixed(1)}s!`);
+          setTimeout(() => hideMessage(), 1000);
         }
+        updateStatus();
+      } else if (msg.type === 'shield_result') {
+        if (msg.success) {
+          shieldActive = true;
+          showMessage('Khiên đã kích hoạt!');
+          setTimeout(() => hideMessage(), 1000);
+        } else {
+          if (msg.cooldown > 0) {
+            showMessage('Khiên đang hồi chiêu!');
+          } else {
+            showMessage('Không có khiên!');
+          }
+          setTimeout(() => hideMessage(), 1000);
+        }
+        deflectShields = msg.shields || 0;
+        shieldCooldown = msg.cooldown || 0;
         updateStatus();
       }
     };
@@ -235,10 +273,35 @@
         const remain = Math.max(0, attractUntil - now).toFixed(1);
         parts.push(`Lực hút R=${Math.round(attractRange)} (${remain}s)`);
       }
+      if (invisibilityUntil > now) {
+        const remain = Math.max(0, invisibilityUntil - now).toFixed(1);
+        parts.push(`👻 Tàng hình (${remain}s)`);
+      }
+      if (shieldAmmo > 0) {
+        parts.push(`Mũi tên: ${shieldAmmo}`);
+      }
+      if (deflectShields > 0) {
+        parts.push(`Khiên: ${deflectShields}`);
+      }
+      if (shieldActive) {
+        parts.push(`🛡️ Khiên hoạt động`);
+      } else if (shieldCooldown > 0) {
+        parts.push(`Khiên hồi chiêu: ${shieldCooldown.toFixed(1)}s`);
+      }
+      if (isBoostHeld && my && my.r > 10) {
+        parts.push(`Đang tăng tốc (giữ chuột trái)`);
+      }
       document.getElementById('status').innerHTML = parts.join('<br>');
     }
 
+    // Track mouse position cho việc bắn
+    let lastMouseX = 0;
+    let lastMouseY = 0;
+
     canvas.addEventListener('mousemove', e => {
+      lastMouseX = e.clientX - canvas.getBoundingClientRect().left;
+      lastMouseY = e.clientY - canvas.getBoundingClientRect().top;
+      
       if (!my) return;
       const world = screenToWorld(e.clientX, e.clientY);
       ws.send(JSON.stringify({
@@ -246,6 +309,52 @@
         x: world.x,
         y: world.y
       }));
+    });
+
+    // Mouse boost (tăng tốc khi giữ chuột trái)
+    canvas.addEventListener('mousedown', e => {
+      if (e.button === 0 && my && my.r > 10) {  // chuột trái
+        isBoostHeld = true;
+        ws.send(JSON.stringify({
+          type: 'boost',
+          active: true
+        }));
+        updateStatus();
+      }
+    });
+
+    canvas.addEventListener('mouseup', e => {
+      if (e.button === 0 && isBoostHeld) {  // chuột trái
+        isBoostHeld = false;
+        ws.send(JSON.stringify({
+          type: 'boost',
+          active: false
+        }));
+        updateStatus();
+      }
+    });
+
+    // Bắn mũi tên với phím Space
+    document.addEventListener('keydown', e => {
+      if (e.code === 'Space' && my && shieldAmmo > 0) {
+        e.preventDefault();
+        // Bắn về phía con trỏ chuột
+        const world = screenToWorld(lastMouseX, lastMouseY);
+        
+        ws.send(JSON.stringify({
+          type: 'shoot',
+          x: world.x,
+          y: world.y
+        }));
+        shieldAmmo = Math.max(0, shieldAmmo - 1);  // giảm locally để responsive
+        updateStatus();
+      } else if (e.code === 'KeyZ' && my && deflectShields > 0 && !shieldActive) {
+        e.preventDefault();
+        // Kích hoạt khiên phản đạn
+        ws.send(JSON.stringify({
+          type: 'shield'
+        }));
+      }
     });
     canvas.addEventListener('touchmove', e => {
       if (!my) return;
@@ -335,6 +444,68 @@
         ctx.fill();
       }
 
+      // Arrows (mũi tên)
+      for (const arrow of state.arrows) {
+        const sx = arrow.x - camX;
+        const sy = arrow.y - camY;
+        if (sx < -50 || sx > W + 50 || sy < -50 || sy > H + 50) continue;
+        
+        // Vẽ mũi tên như một đường thẳng có đầu mũi
+        const speed = Math.hypot(arrow.vx, arrow.vy);
+        const length = 15; // độ dài mũi tên trên màn hình
+        const dx = (arrow.vx / speed) * length;
+        const dy = (arrow.vy / speed) * length;
+        
+        ctx.strokeStyle = '#ff6b6b';
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+        
+        // Thân mũi tên
+        ctx.beginPath();
+        ctx.moveTo(sx - dx, sy - dy);
+        ctx.lineTo(sx, sy);
+        ctx.stroke();
+        
+        // Đầu mũi tên
+        const arrowSize = 6;
+        const angle = Math.atan2(arrow.vy, arrow.vx);
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(sx - arrowSize * Math.cos(angle - Math.PI/6), sy - arrowSize * Math.sin(angle - Math.PI/6));
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(sx - arrowSize * Math.cos(angle + Math.PI/6), sy - arrowSize * Math.sin(angle + Math.PI/6));
+        ctx.stroke();
+      }
+
+      // Orbitals (vòng tròn phòng thủ)
+      if (state.orbitals && state.orbitals.length > 0) {
+        console.log('Rendering orbitals:', state.orbitals.length);
+        for (const orbital of state.orbitals) {
+          const sx = orbital.x - camX;
+          const sy = orbital.y - camY;
+          if (sx < -50 || sx > W + 50 || sy < -50 || sy > H + 50) continue;
+          
+          // Vẽ vòng tròn quay
+          ctx.beginPath();
+          ctx.fillStyle = '#f97316'; // màu cam
+          ctx.strokeStyle = '#ff8c42';
+          ctx.lineWidth = 2;
+          ctx.arc(sx, sy, 8, 0, Math.PI * 2); // kích thước vòng tròn
+          ctx.fill();
+          ctx.stroke();
+          
+          // Thêm hiệu ứng phát sáng
+          ctx.save();
+          ctx.shadowColor = '#f97316';
+          ctx.shadowBlur = 10;
+          ctx.beginPath();
+          ctx.arc(sx, sy, 4, 0, Math.PI * 2);
+          ctx.fillStyle = '#ffab66';
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+
       // Players (vị trí đã làm mượt) + vòng lực hút cùng màu
       const sorted = [...state.players].sort((a, b) => a.r - b.r);
       for (const p of sorted) {
@@ -351,6 +522,17 @@
 
         const sx = s.x - camX,
           sy = s.y - camY;
+        
+        // Set alpha for invisible players
+        const isInvisible = p.invisible || false;
+        if (isInvisible && p.id !== state.id) {
+          ctx.globalAlpha = 0.2; // Rất mờ cho invisible players (trừ bản thân)
+        } else if (isInvisible && p.id === state.id) {
+          ctx.globalAlpha = 0.6; // Hơi mờ cho bản thân khi invisible
+        } else {
+          ctx.globalAlpha = 1.0; // Bình thường
+        }
+        
         // Nút người chơi
         ctx.beginPath();
         ctx.fillStyle = p.color;
@@ -363,6 +545,22 @@
         ctx.textAlign = 'center';
         ctx.fillText((p.name || p.id.slice(0, 4)), sx, sy + 4);
         if (p.id === state.id) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke(); }
+        
+        // Reset alpha
+        ctx.globalAlpha = 1.0;
+
+        // Khiên phản đạn (màu hồng khi active)
+        if (p.shieldActive) {
+          ctx.save();
+          ctx.strokeStyle = '#ec4899'; // màu hồng
+          ctx.globalAlpha = 0.7;
+          ctx.lineWidth = 4;
+          ctx.setLineDash([8, 4]);
+          ctx.beginPath();
+          ctx.arc(sx, sy, s.r + 8, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+        }
 
         // Vòng lực hút (cùng màu với nút), hiển thị khi còn đáng kể
         if (s.attractRange > 0.5) {
